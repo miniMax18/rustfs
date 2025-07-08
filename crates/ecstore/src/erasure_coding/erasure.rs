@@ -40,6 +40,7 @@ use bytes::{Bytes, BytesMut};
 use reed_solomon_simd;
 use smallvec::SmallVec;
 use std::io;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tracing::warn;
 use uuid::Uuid;
@@ -48,9 +49,9 @@ use uuid::Uuid;
 pub struct ReedSolomonEncoder {
     data_shards: usize,
     parity_shards: usize,
-    // 使用RwLock确保线程安全，实现Send + Sync
-    encoder_cache: std::sync::RwLock<Option<reed_solomon_simd::ReedSolomonEncoder>>,
-    decoder_cache: std::sync::RwLock<Option<reed_solomon_simd::ReedSolomonDecoder>>,
+    // 使用Arc包装缓存以实现更好的共享和性能
+    encoder_cache: std::sync::Arc<std::sync::RwLock<Option<reed_solomon_simd::ReedSolomonEncoder>>>,
+    decoder_cache: std::sync::Arc<std::sync::RwLock<Option<reed_solomon_simd::ReedSolomonDecoder>>>,
 }
 
 impl Clone for ReedSolomonEncoder {
@@ -58,9 +59,9 @@ impl Clone for ReedSolomonEncoder {
         Self {
             data_shards: self.data_shards,
             parity_shards: self.parity_shards,
-            // 为新实例创建空的缓存，不共享缓存
-            encoder_cache: std::sync::RwLock::new(None),
-            decoder_cache: std::sync::RwLock::new(None),
+            // 共享缓存以提升性能，多个实例可以重用编码器
+            encoder_cache: Arc::clone(&self.encoder_cache),
+            decoder_cache: Arc::clone(&self.decoder_cache),
         }
     }
 }
@@ -71,8 +72,8 @@ impl ReedSolomonEncoder {
         Ok(ReedSolomonEncoder {
             data_shards,
             parity_shards,
-            encoder_cache: std::sync::RwLock::new(None),
-            decoder_cache: std::sync::RwLock::new(None),
+            encoder_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            decoder_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -874,7 +875,7 @@ mod tests {
             // Lose exactly the maximum number of shards (equal to parity_shards)
             let mut shards_opt: Vec<Option<Vec<u8>>> = shards.iter().map(|b| Some(b.to_vec())).collect();
             shards_opt[0] = None; // Data shard
-            shards_opt[2] = None; // Data shard  
+            shards_opt[2] = None; // Data shard
             shards_opt[6] = None; // Parity shard
 
             // Should succeed with maximum erasures
@@ -981,7 +982,7 @@ mod tests {
             // 模拟数据丢失 - 丢失最大可恢复数量的shard
             let mut shards_opt: Vec<Option<Vec<u8>>> = shards.iter().map(|b| Some(b.to_vec())).collect();
             shards_opt[0] = None; // 丢失第1个数据shard
-            shards_opt[2] = None; // 丢失第3个数据shard  
+            shards_opt[2] = None; // 丢失第3个数据shard
             shards_opt[8] = None; // 丢失第3个奇偶shard (index 6+3-1=8)
 
             println!("💥 Simulated loss of 3 shards (max recoverable with 3 parity shards)");

@@ -93,6 +93,7 @@ rustfs-utils = { workspace = true, features = ["full"] }
 rustfs-rio.workspace = true
 rustfs-signer.workspace = true
 futures-util.workspace = true
+lru = "0.12"     # For metadata caching
 
 [target.'cfg(not(windows))'.dependencies]
 nix = { workspace = true }

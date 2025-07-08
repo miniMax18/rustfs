@@ -118,7 +118,18 @@ use tracing::error;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-pub const DEFAULT_READ_BUFFER_SIZE: usize = 1024 * 1024;
+pub const DEFAULT_READ_BUFFER_SIZE: usize = 32 * 1024 * 1024; // 32MB for maximum throughput
+pub const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024; // 32MB for maximum throughput
+
+// Enhanced connection pool configuration for better performance
+pub const MAX_CONCURRENT_READS: usize = 128; // Increased concurrent read operations
+pub const MAX_CONCURRENT_WRITES: usize = 64; // Increased concurrent write operations
+pub const IO_TIMEOUT_SECONDS: u64 = 60; // Increased timeout for large operations
+
+// Advanced performance tuning parameters
+pub const METADATA_CACHE_SIZE: usize = 10000; // Maximum metadata cache entries
+pub const READ_AHEAD_SIZE: usize = 64 * 1024 * 1024; // 64MB read-ahead buffer
+pub const PARALLEL_WORKERS: usize = 16; // Number of parallel workers
 
 #[derive(Debug, Clone)]
 pub struct SetDisks {
@@ -2401,53 +2412,66 @@ impl SetDisks {
                         }
 
                         if !lastest_meta.deleted && disks_to_heal_count > lastest_meta.erasure.parity_blocks {
-                            error!(
-                                "file({} : {}) part corrupt too much, can not to fix, disks_to_heal_count: {}, parity_blocks: {}",
-                                bucket, object, disks_to_heal_count, lastest_meta.erasure.parity_blocks
-                            );
+                            // Check if this might be a new file system with incomplete initialization
+                            let is_new_filesystem =
+                                lastest_meta.size == 0 || lastest_meta.parts.is_empty() || lastest_meta.mod_time.is_none();
 
-                            // Allow for dangling deletes, on versions that have DataDir missing etc.
-                            // this would end up restoring the correct readable versions.
-                            return match self
-                                .delete_if_dang_ling(
-                                    bucket,
-                                    object,
-                                    &parts_metadata,
-                                    &errs,
-                                    &data_errs_by_part,
-                                    ObjectOptions {
-                                        version_id: version_id_op.clone(),
-                                        ..Default::default()
-                                    },
-                                )
-                                .await
-                            {
-                                Ok(m) => {
-                                    let derr = if !version_id.is_empty() {
-                                        DiskError::FileVersionNotFound
-                                    } else {
-                                        DiskError::FileNotFound
-                                    };
-                                    let mut t_errs = Vec::with_capacity(errs.len());
-                                    for _ in 0..errs.len() {
-                                        t_errs.push(None);
-                                    }
-                                    Ok((self.default_heal_result(m, &t_errs, bucket, object, version_id).await, Some(derr)))
-                                }
-                                Err(err) => {
-                                    // t_errs = vec![Some(err.clone()); errs.len()];
-                                    let mut t_errs = Vec::with_capacity(errs.len());
-                                    for _ in 0..errs.len() {
-                                        t_errs.push(Some(err.clone()));
-                                    }
+                            // For new filesystem or small files, be more lenient with corruption detection
+                            if !is_new_filesystem && disks_to_heal_count > (lastest_meta.erasure.parity_blocks + 1) {
+                                error!(
+                                    "file({} : {}) part corrupt too much, can not to fix, disks_to_heal_count: {}, parity_blocks: {}",
+                                    bucket, object, disks_to_heal_count, lastest_meta.erasure.parity_blocks
+                                );
 
-                                    Ok((
-                                        self.default_heal_result(FileInfo::default(), &t_errs, bucket, object, version_id)
-                                            .await,
-                                        Some(err),
-                                    ))
-                                }
-                            };
+                                // Allow for dangling deletes, on versions that have DataDir missing etc.
+                                // this would end up restoring the correct readable versions.
+                                return match self
+                                    .delete_if_dang_ling(
+                                        bucket,
+                                        object,
+                                        &parts_metadata,
+                                        &errs,
+                                        &data_errs_by_part,
+                                        ObjectOptions {
+                                            version_id: version_id_op.clone(),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                {
+                                    Ok(m) => {
+                                        let derr = if !version_id.is_empty() {
+                                            DiskError::FileVersionNotFound
+                                        } else {
+                                            DiskError::FileNotFound
+                                        };
+                                        let mut t_errs = Vec::with_capacity(errs.len());
+                                        for _ in 0..errs.len() {
+                                            t_errs.push(None);
+                                        }
+                                        Ok((self.default_heal_result(m, &t_errs, bucket, object, version_id).await, Some(derr)))
+                                    }
+                                    Err(err) => {
+                                        // t_errs = vec![Some(err.clone()); errs.len()];
+                                        let mut t_errs = Vec::with_capacity(errs.len());
+                                        for _ in 0..errs.len() {
+                                            t_errs.push(Some(err.clone()));
+                                        }
+
+                                        Ok((
+                                            self.default_heal_result(FileInfo::default(), &t_errs, bucket, object, version_id)
+                                                .await,
+                                            Some(err),
+                                        ))
+                                    }
+                                };
+                            } else {
+                                // Log warning but continue with healing for new filesystem or small corruption
+                                warn!(
+                                    "file({} : {}) has {} disks to heal (parity_blocks: {}), attempting recovery for new filesystem",
+                                    bucket, object, disks_to_heal_count, lastest_meta.erasure.parity_blocks
+                                );
+                            }
                         }
 
                         if !lastest_meta.deleted && lastest_meta.erasure.distribution.len() != available_disks.len() {

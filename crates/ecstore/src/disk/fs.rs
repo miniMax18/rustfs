@@ -121,7 +121,7 @@ pub async fn access(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 pub fn access_std(path: impl AsRef<Path>) -> io::Result<()> {
-    tokio::task::block_in_place(|| std::fs::metadata(path))?;
+    std::fs::metadata(path)?;
     Ok(())
 }
 
@@ -130,7 +130,7 @@ pub async fn lstat(path: impl AsRef<Path>) -> io::Result<Metadata> {
 }
 
 pub fn lstat_std(path: impl AsRef<Path>) -> io::Result<Metadata> {
-    tokio::task::block_in_place(|| std::fs::metadata(path))
+    std::fs::metadata(path)
 }
 
 pub async fn make_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
@@ -159,26 +159,22 @@ pub async fn remove_all(path: impl AsRef<Path>) -> io::Result<()> {
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn remove_std(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
-    tokio::task::block_in_place(|| {
-        let meta = std::fs::metadata(path)?;
-        if meta.is_dir() {
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
-        }
-    })
+    let meta = std::fs::metadata(path)?;
+    if meta.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 pub fn remove_all_std(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
-    tokio::task::block_in_place(|| {
-        let meta = std::fs::metadata(path)?;
-        if meta.is_dir() {
-            std::fs::remove_dir_all(path)
-        } else {
-            std::fs::remove_file(path)
-        }
-    })
+    let meta = std::fs::metadata(path)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 pub async fn mkdir(path: impl AsRef<Path>) -> io::Result<()> {
@@ -190,7 +186,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 }
 
 pub fn rename_std(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-    tokio::task::block_in_place(|| std::fs::rename(from, to))
+    std::fs::rename(from, to)
 }
 
 #[tracing::instrument(level = "debug", skip_all)]

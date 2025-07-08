@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Development management script for RustFS multi-node deployment
 
 # ps -ef | grep rustfs | awk '{print $2}'| xargs kill -9
 
-# 本地 rustfs.zip 路径
+# Local rustfs.zip path
 ZIP_FILE="./rustfs.zip"
-# 解压目标
+# Extract target directory
 UNZIP_TARGET="./"
-
 
 SERVER_LIST=(
     "root@node1" # node1
@@ -35,119 +35,119 @@ SERVER_LIST=(
 
 REMOTE_TMP="~/rustfs"
 
-# 部署 rustfs 到所有服务器
+# Deploy rustfs to all servers
 deploy() {
-    echo "解压 $ZIP_FILE ..."
+    echo "Extracting $ZIP_FILE ..."
     unzip -o "$ZIP_FILE" -d "$UNZIP_TARGET"
     if [ $? -ne 0 ]; then
-        echo "解压失败，退出"
+        echo "Extraction failed, exiting"
         exit 1
     fi
 
     LOCAL_RUSTFS="${UNZIP_TARGET}rustfs"
     if [ ! -f "$LOCAL_RUSTFS" ]; then
-        echo "未找到解压后的 rustfs 文件，退出"
+        echo "Extracted rustfs file not found, exiting"
         exit 1
     fi
 
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "上传 $LOCAL_RUSTFS 到 $SERVER:$REMOTE_TMP"
+        echo "Uploading $LOCAL_RUSTFS to $SERVER:$REMOTE_TMP"
         scp "$LOCAL_RUSTFS" "${SERVER}:${REMOTE_TMP}"
         if [ $? -ne 0 ]; then
-            echo "❌ 上传到 $SERVER 失败，跳过"
+            echo "❌ Failed to upload to $SERVER, skipping"
             continue
         fi
 
-        echo "在 $SERVER 上操作 systemctl 和文件替换"
+        echo "Performing systemctl operations and file replacement on $SERVER"
         ssh "$SERVER" bash <<EOF
 set -e
-echo "停止 rustfs 服务"
+echo "Stopping rustfs service"
 sudo systemctl stop rustfs || true
-echo "覆盖 /usr/local/bin/rustfs"
+echo "Replacing /usr/local/bin/rustfs"
 sudo cp ~/rustfs /usr/local/bin/rustfs
 sudo chmod +x /usr/local/bin/rustfs
-echo "启动 rustfs 服务"
+echo "Starting rustfs service"
 sudo systemctl start rustfs
-echo "检测 rustfs 服务状态"
+echo "Checking rustfs service status"
 sudo systemctl status rustfs --no-pager --lines=10
 EOF
 
         if [ $? -eq 0 ]; then
-            echo "✅ $SERVER 部署并重启 rustfs 成功"
+            echo "✅ Successfully deployed and restarted rustfs on $SERVER"
         else
-            echo "❌ $SERVER 部署或重启 rustfs 失败"
+            echo "❌ Failed to deploy or restart rustfs on $SERVER"
         fi
     done
 }
 
-# 清空 /data/rustfs0~3 目录下所有文件（包括隐藏文件）
+# Clear all files in /data/rustfs0~3 directories (including hidden files)
 clear_data_dirs() {
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "清空 $SERVER:/data/rustfs0~3 下所有文件"
+        echo "Clearing all files in $SERVER:/data/rustfs0~3"
         ssh "$SERVER" bash <<EOF
 for i in {0..3}; do
     DIR="/data/rustfs$i"
-    echo "处理 $DIR"
+    echo "Processing $DIR"
     if [ -d "$DIR" ]; then
-        echo "清空 $DIR"
+        echo "Clearing $DIR"
         sudo rm -rf "$DIR"/* "$DIR"/.[!.]* "$DIR"/..?* 2>/dev/null || true
-        echo "已清空 $DIR"
+        echo "Successfully cleared $DIR"
     else
-        echo "$DIR 不存在，跳过"
+        echo "$DIR does not exist, skipping"
     fi
 done
 EOF
     done
 }
 
-# 控制 rustfs 服务
+# Control rustfs service
 stop_rustfs() {
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "停止 $SERVER rustfs 服务"
+        echo "Stopping rustfs service on $SERVER"
         ssh "$SERVER" "sudo systemctl stop rustfs"
     done
 }
 
 start_rustfs() {
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "启动 $SERVER rustfs 服务"
+        echo "Starting rustfs service on $SERVER"
         ssh "$SERVER" "sudo systemctl start rustfs"
     done
 }
 
 restart_rustfs() {
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "重启 $SERVER rustfs 服务"
+        echo "Restarting rustfs service on $SERVER"
         ssh "$SERVER" "sudo systemctl restart rustfs"
     done
 }
 
-# 向所有服务器追加公钥到 ~/.ssh/authorized_keys
+# Add SSH public key to all servers' ~/.ssh/authorized_keys
 add_ssh_key() {
     if [ -z "$2" ]; then
-        echo "用法: $0 addkey <pubkey_file>"
+        echo "Usage: $0 addkey <pubkey_file>"
         exit 1
     fi
     PUBKEY_FILE="$2"
     if [ ! -f "$PUBKEY_FILE" ]; then
-        echo "指定的公钥文件不存在: $PUBKEY_FILE"
+        echo "Specified public key file does not exist: $PUBKEY_FILE"
         exit 1
     fi
     PUBKEY_CONTENT=$(cat "$PUBKEY_FILE")
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "追加公钥到 $SERVER:~/.ssh/authorized_keys"
+        echo "Adding public key to $SERVER:~/.ssh/authorized_keys"
         ssh "$SERVER" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$PUBKEY_CONTENT' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
         if [ $? -eq 0 ]; then
-            echo "✅ $SERVER 公钥追加成功"
+            echo "✅ Successfully added public key to $SERVER"
         else
-            echo "❌ $SERVER 公钥追加失败"
+            echo "❌ Failed to add public key to $SERVER"
         fi
     done
 }
 
 monitor_logs() {
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "监控 $SERVER:/var/logs/rustfs/rustfs.log ..."
+        echo "Monitoring logs on $SERVER:/var/logs/rustfs/rustfs.log ..."
         ssh "$SERVER" "tail -F /var/logs/rustfs/rustfs.log" |
             sed "s/^/[$SERVER] /" &
     done
@@ -156,32 +156,32 @@ monitor_logs() {
 
 set_env_file() {
     if [ -z "$2" ]; then
-        echo "用法: $0 setenv <env_file>"
+        echo "Usage: $0 setenv <env_file>"
         exit 1
     fi
     ENV_FILE="$2"
     if [ ! -f "$ENV_FILE" ]; then
-        echo "指定的环境变量文件不存在: $ENV_FILE"
+        echo "Specified environment file does not exist: $ENV_FILE"
         exit 1
     fi
     for SERVER in "${SERVER_LIST[@]}"; do
-        echo "上传 $ENV_FILE 到 $SERVER:~/rustfs.env"
+        echo "Uploading $ENV_FILE to $SERVER:~/rustfs.env"
         scp "$ENV_FILE" "${SERVER}:~/rustfs.env"
         if [ $? -ne 0 ]; then
-            echo "❌ 上传到 $SERVER 失败，跳过"
+            echo "❌ Failed to upload to $SERVER, skipping"
             continue
         fi
-        echo "覆盖 $SERVER:/etc/default/rustfs"
+        echo "Replacing $SERVER:/etc/default/rustfs"
         ssh "$SERVER" "sudo mv ~/rustfs.env /etc/default/rustfs"
         if [ $? -eq 0 ]; then
-            echo "✅ $SERVER /etc/default/rustfs 覆盖成功"
+            echo "✅ Successfully replaced /etc/default/rustfs on $SERVER"
         else
-            echo "❌ $SERVER /etc/default/rustfs 覆盖失败"
+            echo "❌ Failed to replace /etc/default/rustfs on $SERVER"
         fi
     done
 }
 
-# 主命令分发
+# Main command dispatcher
 case "$1" in
     deploy)
         deploy
@@ -201,13 +201,23 @@ case "$1" in
     addkey)
         add_ssh_key "$@"
         ;;
-    monitor_logs)
+    monitor)
         monitor_logs
         ;;
     setenv)
         set_env_file "$@"
         ;;
     *)
-        echo "用法: $0 {deploy|clear|stop|start|restart|addkey <pubkey_file>|monitor_logs|setenv <env_file>}"
+        echo "Usage: $0 {deploy|clear|stop|start|restart|addkey|monitor|setenv}"
+        echo "Commands:"
+        echo "  deploy  - Deploy rustfs binary to all servers"
+        echo "  clear   - Clear all data directories on all servers"
+        echo "  stop    - Stop rustfs service on all servers"
+        echo "  start   - Start rustfs service on all servers"
+        echo "  restart - Restart rustfs service on all servers"
+        echo "  addkey  - Add SSH public key to all servers"
+        echo "  monitor - Monitor logs from all servers"
+        echo "  setenv  - Set environment file on all servers"
+        exit 1
         ;;
 esac

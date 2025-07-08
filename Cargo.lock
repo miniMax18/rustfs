@@ -7977,6 +7977,7 @@ dependencies = [
  "hyper-rustls 0.27.7",
  "hyper-util",
  "lazy_static",
+ "lru",
  "md-5",
  "nix 0.30.1",
  "num_cpus",

@@ -80,13 +80,15 @@ where
             return (vec![None; self.readers.len()], vec![None; self.readers.len()]);
         }
 
-        // 使用并发读取所有分片
+        // 使用并发读取所有分片，使用更大的缓冲区大小来提升性能
         let mut read_futs = Vec::with_capacity(self.readers.len());
 
         for (i, opt_reader) in self.readers.iter_mut().enumerate() {
             let future = if let Some(reader) = opt_reader.as_mut() {
                 Box::pin(async move {
-                    let mut buf = vec![0u8; shard_size];
+                    // 预分配缓冲区并设置更大的初始容量
+                    let mut buf = Vec::with_capacity(shard_size.max(64 * 1024)); // 至少64KB缓冲区
+                    buf.resize(shard_size, 0);
                     match reader.read(&mut buf).await {
                         Ok(n) => {
                             buf.truncate(n);

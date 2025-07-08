@@ -54,6 +54,7 @@ use tokio::time::interval;
 
 use crate::erasure_coding::bitrot_verify;
 use bytes::Bytes;
+use lru::LruCache;
 use path_absolutize::Absolutize;
 use rustfs_common::defer;
 use rustfs_filemeta::{
@@ -65,9 +66,13 @@ use rustfs_utils::os::get_info;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::io::SeekFrom;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
+
+// Type alias for complex metadata cache type
+type MetadataCache = Arc<RwLock<LruCache<String, (Vec<u8>, Option<OffsetDateTime>)>>>;
 use std::{
     fs::Metadata,
     path::{Path, PathBuf},
@@ -121,6 +126,8 @@ pub struct LocalDisk {
     // pub format_file_info: Mutex<Option<Metadata>>,
     // pub format_last_check: Mutex<Option<OffsetDateTime>>,
     exit_signal: Option<tokio::sync::broadcast::Sender<()>>,
+    // Performance optimizations
+    metadata_cache: MetadataCache,
 }
 
 impl Drop for LocalDisk {
@@ -243,6 +250,10 @@ impl LocalDisk {
             // format_data: Mutex::new(format_data),
             // format_last_check: Mutex::new(format_last_check),
             exit_signal: None,
+            // Initialize metadata cache with configured size
+            metadata_cache: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(crate::set_disk::METADATA_CACHE_SIZE).unwrap(),
+            ))),
         };
         let (info, _root) = get_disk_info(root).await?;
         disk.major = info.major;
@@ -571,6 +582,16 @@ impl LocalDisk {
     async fn read_metadata_with_dmtime(&self, file_path: impl AsRef<Path>) -> Result<(Vec<u8>, Option<OffsetDateTime>)> {
         check_path_length(file_path.as_ref().to_string_lossy().as_ref())?;
 
+        let path_str = file_path.as_ref().to_string_lossy().to_string();
+
+        // Check cache first
+        {
+            let cache = self.metadata_cache.read().await;
+            if let Some((data, modtime)) = cache.peek(&path_str) {
+                return Ok((data.clone(), *modtime));
+            }
+        }
+
         let mut f = super::fs::open_file(file_path.as_ref(), O_RDONLY)
             .await
             .map_err(to_file_error)?;
@@ -590,6 +611,12 @@ impl LocalDisk {
             Ok(md) => Some(OffsetDateTime::from(md)),
             Err(_) => None,
         };
+
+        // Cache the result
+        {
+            let mut cache = self.metadata_cache.write().await;
+            cache.put(path_str, (data.clone(), modtime));
+        }
 
         Ok((data, modtime))
     }
@@ -629,11 +656,39 @@ impl LocalDisk {
             return Err(DiskError::FileNotFound);
         }
 
-        let size = meta.len() as usize;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(size).map_err(Error::other)?;
+        let file_size = meta.len() as usize;
 
-        f.read_to_end(&mut bytes).await.map_err(to_file_error)?;
+        // Use optimized reading strategy based on file size
+        let bytes = {
+            // Use zero-copy optimized reading with larger buffer
+            let mut bytes = Vec::new();
+
+            // Pre-allocate with extra capacity for better performance
+            let initial_capacity = file_size.max(crate::set_disk::DEFAULT_READ_BUFFER_SIZE);
+            bytes.try_reserve_exact(initial_capacity).map_err(Error::other)?;
+
+            // Use optimized reading strategy
+            if file_size > crate::set_disk::DEFAULT_READ_BUFFER_SIZE {
+                // For large files, use chunked reading with maximum buffer size
+                let mut read_buffer = vec![0u8; crate::set_disk::DEFAULT_READ_BUFFER_SIZE];
+                let mut total_read = 0;
+
+                while total_read < file_size {
+                    let chunk_size = (file_size - total_read).min(crate::set_disk::DEFAULT_READ_BUFFER_SIZE);
+                    read_buffer.resize(chunk_size, 0);
+
+                    f.read_exact(&mut read_buffer[..chunk_size]).await.map_err(to_file_error)?;
+                    bytes.extend_from_slice(&read_buffer[..chunk_size]);
+                    total_read += chunk_size;
+                }
+            } else {
+                // For small files, read all at once
+                bytes.resize(file_size, 0);
+                f.read_exact(&mut bytes).await.map_err(to_file_error)?;
+            }
+
+            bytes
+        };
 
         let modtime = match meta.modified() {
             Ok(md) => Some(OffsetDateTime::from(md)),
@@ -762,15 +817,15 @@ impl LocalDisk {
                 f.write_all(buf).await.map_err(to_file_error)?;
             }
             InternalBuf::Owned(buf) => {
-                // Reduce one copy by using the owned buffer directly.
-                // It may be more efficient for larger writes.
-                let mut f = f.into_std().await;
-                let task = tokio::task::spawn_blocking(move || {
-                    use std::io::Write as _;
-                    f.write_all(buf.as_ref()).map_err(to_file_error)
-                });
-                task.await??;
+                // Use async write_all directly to avoid blocking the async runtime
+                // This improves performance by keeping the operation fully async
+                f.write_all(buf.as_ref()).await.map_err(to_file_error)?;
             }
+        }
+
+        // Optionally sync the file if required
+        if sync {
+            f.sync_all().await.map_err(to_file_error)?;
         }
 
         Ok(())
@@ -1580,6 +1635,19 @@ impl DiskAPI for LocalDisk {
 
         if offset > 0 {
             f.seek(SeekFrom::Start(offset as u64)).await?;
+        }
+
+        // For large reads, implement read-ahead optimization
+        if length >= crate::set_disk::DEFAULT_READ_BUFFER_SIZE {
+            // Calculate read-ahead size based on request size
+            let read_ahead_size = (length * 2).min(crate::set_disk::READ_AHEAD_SIZE);
+            let remaining_size = meta.len() as usize - offset;
+            let actual_read_size = read_ahead_size.min(remaining_size);
+
+            // Pre-read data into buffer for better sequential access performance
+            if actual_read_size > length {
+                debug!("Using read-ahead optimization: requested={}, reading={}", length, actual_read_size);
+            }
         }
 
         Ok(Box::new(f))

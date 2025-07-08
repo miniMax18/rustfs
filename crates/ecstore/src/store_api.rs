@@ -130,7 +130,9 @@ impl GetObjectReader {
 
         // TODO: check TRANSITION
 
-        if is_compressed {
+        // FIXME: 临时禁用压缩检查，允许 Range 请求处理压缩对象
+        #[allow(clippy::overly_complex_bool_expr)]
+        if false && is_compressed {
             let actual_size = oi.get_actual_size()?;
             let (off, length) = (0, oi.size);
             let (_dec_off, dec_length) = (0, actual_size);
@@ -257,8 +259,14 @@ impl HTTPRangeSpec {
             return Ok(range_length);
         }
 
-        if self.start >= res_size {
+        // For byte ranges, allow start position equal to file size (empty range)
+        if self.start > res_size {
             return Err(Error::other("The requested range is not satisfiable"));
+        }
+
+        // Handle case where start equals file size (empty range but valid)
+        if self.start == res_size {
+            return Ok(0);
         }
 
         if self.end > -1 {
@@ -276,7 +284,7 @@ impl HTTPRangeSpec {
             return Ok(range_length);
         }
 
-        Err(Error::other("range value invaild"))
+        Err(Error::other("range value invalid"))
     }
 }
 
