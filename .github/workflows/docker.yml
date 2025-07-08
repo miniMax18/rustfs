@@ -62,43 +62,9 @@ env:
   REGISTRY_GHCR: ghcr.io/${{ github.repository }}
 
 jobs:
-  # Check if we should build
-  build-check:
-    name: Build Check
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      should_push: ${{ steps.check.outputs.should_push }}
-    steps:
-      - name: Check build conditions
-        id: check
-        run: |
-          should_build=false
-          should_push=false
-
-          # Always build on workflow_dispatch or when changes detected
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || \
-             [[ "${{ github.event_name }}" == "push" ]] || \
-             [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            should_build=true
-          fi
-
-          # Push only on main branch, tags, or manual trigger
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]] || \
-             [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]] || \
-             [[ "${{ github.event.inputs.push_images }}" == "true" ]]; then
-            should_push=true
-          fi
-
-          echo "should_build=$should_build" >> $GITHUB_OUTPUT
-          echo "should_push=$should_push" >> $GITHUB_OUTPUT
-          echo "Build: $should_build, Push: $should_push"
-
   # Build multi-arch Docker images
   build-docker:
     name: Build Docker Images
-    needs: build-check
-    if: needs.build-check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -125,14 +91,14 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Login to Docker Hub
-        if: needs.build-check.outputs.should_push == 'true' && secrets.DOCKERHUB_USERNAME != ''
+        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event.inputs.push_images == 'true') && secrets.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to GitHub Container Registry
-        if: needs.build-check.outputs.should_push == 'true'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event.inputs.push_images == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -161,7 +127,7 @@ jobs:
           context: .
           file: ${{ matrix.variant.dockerfile }}
           platforms: ${{ matrix.variant.platforms }}
-          push: ${{ needs.build-check.outputs.should_push == 'true' }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event.inputs.push_images == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=docker-${{ matrix.variant.name }}
@@ -174,8 +140,8 @@ jobs:
   # Create manifest for main production image
   create-manifest:
     name: Create Manifest
-    needs: [build-check, build-docker]
-    if: needs.build-check.outputs.should_push == 'true' && startsWith(github.ref, 'refs/tags/')
+    needs: build-docker
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event.inputs.push_images == 'true') && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Login to Docker Hub

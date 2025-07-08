@@ -65,45 +65,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Business logic level checks (handling build strategy)
-  build-check:
-    name: Build Strategy Check
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      build_type: ${{ steps.check.outputs.build_type }}
-    steps:
-      - name: Determine build strategy
-        id: check
-        run: |
-          should_build=false
-          build_type="none"
-
-          # Business logic: when we need to build
-          if [[ "${{ github.event_name }}" == "schedule" ]] || \
-             [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || \
-             [[ "${{ github.event.inputs.force_build }}" == "true" ]] || \
-             [[ "${{ contains(github.event.head_commit.message, '--build') }}" == "true" ]]; then
-            should_build=true
-            build_type="development"
-          fi
-
-          # Always build for tag pushes (version releases)
-          if [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
-            should_build=true
-            build_type="release"
-            echo "🏷️  Tag detected: forcing release build"
-          fi
-
-          echo "should_build=$should_build" >> $GITHUB_OUTPUT
-          echo "build_type=$build_type" >> $GITHUB_OUTPUT
-          echo "Build needed: $should_build (type: $build_type)"
-
   # Build RustFS binaries
   build-rustfs:
     name: Build RustFS
-    needs: build-check
-    if: needs.build-check.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -250,8 +214,8 @@ jobs:
   # Build GUI (only for releases)
   build-gui:
     name: Build GUI
-    needs: [build-check, build-rustfs]
-    if: needs.build-check.outputs.build_type == 'release'
+    needs: build-rustfs
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -354,8 +318,8 @@ jobs:
   # Release management
   release:
     name: GitHub Release
-    needs: [build-check, build-rustfs, build-gui]
-    if: always() && needs.build-check.outputs.build_type == 'release'
+    needs: [build-rustfs, build-gui]
+    if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -563,8 +527,8 @@ jobs:
   # Upload to OSS (optional)
   upload-oss:
     name: Upload to OSS
-    needs: [build-check, build-rustfs]
-    if: always() && needs.build-check.outputs.build_type == 'release' && needs.build-rustfs.result == 'success'
+    needs: build-rustfs
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.build-rustfs.result == 'success'
     runs-on: ubuntu-latest
     env:
       OSS_ACCESS_KEY_ID: ${{ secrets.ALICLOUDOSS_KEY_ID }}
