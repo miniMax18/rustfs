@@ -64,29 +64,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  skip-check:
-    name: Skip Duplicate Actions
-    permissions:
-      actions: write
-      contents: read
-    runs-on: ubuntu-latest
-    outputs:
-      should_skip: ${{ steps.skip_check.outputs.should_skip }}
-    steps:
-      - name: Skip duplicate actions
-        id: skip_check
-        uses: fkirc/skip-duplicate-actions@v5
-        with:
-          concurrent_skipping: "same_content_newer"
-          cancel_others: true
-          paths_ignore: '["*.md", "docs/**", "deploy/**"]'
-          # Never skip release events and tag pushes
-          do_not_skip: '["release", "push"]'
-
   test-and-lint:
     name: Test and Lint
-    needs: skip-check
-    if: needs.skip-check.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -112,8 +91,6 @@ jobs:
 
   e2e-tests:
     name: End-to-End Tests
-    needs: skip-check
-    if: needs.skip-check.outputs.should_skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
