@@ -24,13 +24,13 @@ use crate::disk::{
 };
 use crate::erasure_coding;
 use crate::erasure_coding::bitrot_verify;
-use crate::error::ObjectApiError;
 use crate::error::{Error, Result};
+use crate::error::{ObjectApiError, is_err_object_not_found};
 use crate::global::GLOBAL_MRFState;
 use crate::global::{GLOBAL_LocalNodeName, GLOBAL_TierConfigMgr};
 use crate::heal::data_usage_cache::DataUsageCache;
 use crate::heal::heal_ops::{HealEntryFn, HealSequence};
-use crate::store_api::ObjectToDelete;
+use crate::store_api::{ListPartsInfo, ObjectToDelete};
 use crate::{
     bucket::lifecycle::bucket_lifecycle_ops::{gen_transition_objname, get_transitioned_object_reader, put_restore_opts},
     cache_value::metacache_set::{ListPathRawOptions, list_path_raw},
@@ -119,6 +119,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub const DEFAULT_READ_BUFFER_SIZE: usize = 1024 * 1024;
+pub const MAX_PARTS_COUNT: usize = 10000;
 
 #[derive(Debug, Clone)]
 pub struct SetDisks {
@@ -315,6 +316,9 @@ impl SetDisks {
             .into_iter()
             .filter(|v| v.as_ref().is_some_and(|d| d.is_local()))
             .collect()
+    }
+    fn default_read_quorum(&self) -> usize {
+        self.set_drive_count - self.default_parity_count
     }
     fn default_write_quorum(&self) -> usize {
         let mut data_count = self.set_drive_count - self.default_parity_count;
@@ -548,6 +552,21 @@ impl SetDisks {
         if errs.iter().any(|e| e.is_some()) {
             warn!("cleanup_multipart_path errs {:?}", &errs);
         }
+    }
+
+    async fn read_parts(
+        disks: &[Option<DiskStore>],
+        bucket: &str,
+        part_meta_paths: &[String],
+        part_numbers: &[usize],
+        read_quorum: usize,
+    ) -> disk::error::Result<Vec<ObjectPartInfo>> {
+        // TODO:
+        unimplemented!()
+    }
+
+    async fn list_parts(disks: &[Option<DiskStore>], part_path: &str, read_quorum: usize) -> disk::error::Result<Vec<usize>> {
+        unimplemented!()
     }
 
     #[tracing::instrument(skip(disks, meta))]
@@ -5064,6 +5083,118 @@ impl StorageAPI for SetDisks {
         };
 
         // error!("put_object_part ret {:?}", &ret);
+
+        Ok(ret)
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn list_object_parts(
+        &self,
+        bucket: &str,
+        object: &str,
+        upload_id: &str,
+        part_number_marker: Option<usize>,
+        mut max_parts: usize,
+        opts: &ObjectOptions,
+    ) -> Result<ListPartsInfo> {
+        let (fi, _) = self.check_upload_id_exists(bucket, object, upload_id, false).await?;
+
+        let upload_id_path = Self::get_upload_id_dir(bucket, object, upload_id);
+
+        if max_parts > MAX_PARTS_COUNT {
+            max_parts = MAX_PARTS_COUNT;
+        }
+
+        let part_number_marker = part_number_marker.unwrap_or_default();
+
+        let mut ret = ListPartsInfo {
+            bucket: bucket.to_owned(),
+            object: object.to_owned(),
+            upload_id: upload_id.to_owned(),
+            max_parts,
+            part_number_marker,
+            user_defined: fi.metadata.clone(),
+            ..Default::default()
+        };
+
+        if max_parts == 0 {
+            return Ok(ret);
+        }
+
+        let online_disks = self.get_disks_internal().await;
+
+        let read_quorum = fi.read_quorum(self.default_read_quorum());
+
+        let part_path = format!(
+            "{}{}",
+            path_join_buf(&[
+                &upload_id_path,
+                fi.data_dir.map(|v| v.to_string()).unwrap_or_default().as_str(),
+            ]),
+            SLASH_SEPARATOR
+        );
+
+        let mut part_numbers = match Self::list_parts(&online_disks, &part_path, read_quorum).await {
+            Ok(parts) => parts,
+            Err(err) => {
+                if err == DiskError::FileNotFound {
+                    return Ok(ret);
+                }
+
+                return Err(to_object_err(err.into(), vec![bucket, object]));
+            }
+        };
+
+        if part_numbers.is_empty() {
+            return Ok(ret);
+        }
+        let start_op = part_numbers.iter().find(|&&v| v != 0 && v == part_number_marker);
+        if part_number_marker > 0 && start_op.is_none() {
+            return Ok(ret);
+        }
+
+        if let Some(start) = start_op {
+            if start + 1 > part_numbers.len() {
+                return Ok(ret);
+            }
+
+            part_numbers = part_numbers[start + 1..].to_vec();
+        }
+
+        let mut parts = Vec::with_capacity(part_numbers.len());
+
+        let part_meta_paths = part_numbers
+            .iter()
+            .map(|v| format!("{part_path}part.{v}.meta"))
+            .collect::<Vec<String>>();
+
+        let object_parts = Self::read_parts(&online_disks, bucket, &part_meta_paths, &part_numbers, read_quorum)
+            .await
+            .map_err(|e| to_object_err(e.into(), vec![bucket, object, upload_id]))?;
+
+        let mut count = max_parts;
+
+        for (i, part) in object_parts.iter().enumerate() {
+            parts.push(PartInfo {
+                etag: Some(part.etag.clone()),
+                part_num: part.number,
+                last_mod: part.mod_time,
+                size: part.size,
+                actual_size: part.actual_size,
+            });
+
+            count -= 1;
+            if count == 0 {
+                break;
+            }
+        }
+
+        ret.parts = parts;
+
+        if object_parts.len() > ret.parts.len() {
+            ret.is_truncated = true;
+            ret.next_part_number_marker = ret.parts.last().map(|v| v.part_num).unwrap_or_default();
+        }
 
         Ok(ret)
     }
