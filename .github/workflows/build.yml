@@ -390,8 +390,16 @@ jobs:
 
             # Create main-latest version filename
             # Convert from rustfs-linux-x86_64-dev-abc123 to rustfs-linux-x86_64-main-latest
-            MAIN_LATEST_NAME=$(echo "$PACKAGE_NAME" | sed 's/-dev-[a-f0-9]\{7\}$/-main-latest/')
+            MAIN_LATEST_NAME=$(echo "$PACKAGE_NAME" | sed 's/-dev-[a-f0-9]\+$/-main-latest/')
             MAIN_LATEST_FILE="${MAIN_LATEST_NAME}.zip"
+
+            # Check if the transformation worked
+            if [[ "$MAIN_LATEST_NAME" == "$PACKAGE_NAME" ]]; then
+              echo "❌ Failed to transform package name to main-latest format"
+              echo "   Original: $PACKAGE_NAME"
+              echo "   Expected pattern: rustfs-platform-arch-dev-XXXXXX"
+              exit 1
+            fi
 
             # Copy the original file to main-latest version
             cp "${{ steps.package.outputs.package_file }}" "$MAIN_LATEST_FILE"
